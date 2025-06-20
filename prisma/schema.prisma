@@ -1,0 +1,43 @@
+// File: prisma/schema.prisma
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+// Model ini untuk user yang login ke WEB DASHBOARD lo.
+model User {
+  id             String          @id @default(cuid())
+  email          String          @unique
+  password       String
+  createdAt      DateTime        @default(now())
+  updatedAt      DateTime        @updatedAt
+  
+  // Satu User Dashboard bisa punya BANYAK akun Zepeto.
+  zepetoAccounts ZepetoAccount[]
+}
+
+// Model ini untuk MENYIMPAN data akun Zepeto yang berhasil di-login.
+model ZepetoAccount {
+  id             String    @id @default(cuid())
+  userId         String    // Ini PENGHUBUNG ke tabel User di atas.
+  name           String
+  zepetoEmail    String
+  zepetoPassword String
+  displayName    String?
+  username       String?
+  profilePic     String?
+  status         String    @default("PENDING")
+  lastValidatedAt DateTime?
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+
+  // Mendefinisikan relasi: Setiap ZepetoAccount PASTI dimiliki oleh satu User.
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+}
