@@ -1,3 +1,4 @@
+// File: app/dashboard/_components/ZepetoUploader.tsx
 'use client';
 
 import { useState, useRef, useTransition } from 'react';
@@ -13,17 +14,30 @@ export function ZepetoUploader({ accounts }: { accounts: ZepetoAccount[] }) {
   const [isPending, startTransition] = useTransition();
   const formRef = useRef<HTMLFormElement>(null);
 
-  const handleSubmit = async (formData: FormData) => {
+  const handleSubmit = (formData: FormData) => {
     setStatus({ type: 'idle', message: '' });
     
     startTransition(async () => {
-      const result = await uploadZepetoItem(formData);
-      
-      if (result.success) {
-          setStatus({ type: 'success', message: result.message as string });
-          formRef.current?.reset();
-      } else {
-          setStatus({ type: 'error', message: result.message as string });
+      try {
+        const result = await uploadZepetoItem(formData);
+        
+        // ===== PERBAIKAN DI SINI =====
+        // Kita cek dulu apakah 'result' ada isinya sebelum dibaca.
+        // Ini akan mencegah error "cannot read properties of undefined".
+        if (result && result.success) {
+            setStatus({ type: 'success', message: result.message as string });
+            formRef.current?.reset();
+        } else if (result) {
+            // Jika result ada tapi success = false
+            setStatus({ type: 'error', message: result.message as string });
+        } else {
+            // Jika result undefined (karena error jaringan, 413, dll)
+            setStatus({ type: 'error', message: 'Upload gagal. Kemungkinan file terlalu besar atau koneksi terputus.' });
+        }
+      } catch (error) {
+        // Menangkap error lain jika ada
+        console.error("Upload error caught in component:", error);
+        setStatus({ type: 'error', message: 'Terjadi error yang tidak terduga.' });
       }
     });
   };
