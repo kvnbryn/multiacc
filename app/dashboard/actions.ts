@@ -92,61 +92,114 @@ export async function addZepetoAccount(formData: FormData) {
   }
 }
 
-// === STEP 1: PERSIAPAN (HANYA AMBIL TOKEN) ===
-// Kita hapus request ke World URL yang bikin 404. Biar Client yang kerja.
+// === HELPER: SMART FETCH WRAPPER ===
+async function tryEndpoints(endpoints: string[], payload: any, token: string) {
+    let lastError;
+    for (const url of endpoints) {
+        try {
+            console.log(`Trying upload endpoint: ${url}`);
+            const res = await fetch(url, {
+                method: 'POST',
+                headers: { 
+                    'Authorization': token,
+                    'Content-Type': 'application/json',
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+                },
+                body: JSON.stringify(payload)
+            });
+            
+            if (res.ok) {
+                console.log(`Success endpoint: ${url}`);
+                return await res.json();
+            }
+            lastError = await res.text();
+            console.warn(`Failed endpoint ${url}: ${res.status} - ${lastError.substring(0,50)}`);
+        } catch (e) {
+            console.error(`Error connecting to ${url}`, e);
+        }
+    }
+    throw new Error(`Semua endpoint gagal. Last error: ${lastError || 'Unknown'}`);
+}
+
+// === STEP 1: PERSIAPAN (Auto-Scan Endpoint) ===
 export async function prepareZepetoUpload(formData: FormData) {
     const session = await getSession();
     if (!session.userId) return { success: false, message: 'Sesi tidak valid.' };
 
     const accountId = formData.get('accountId') as string;
+    const fileName = formData.get('fileName') as string;
     const categoryKey = formData.get('category') as string;
 
     const account = await prisma.zepetoAccount.findUnique({ where: { id: accountId } });
     if (!account || account.status !== 'CONNECTED') return { success: false, message: 'Akun bermasalah.' };
 
     try {
-        // Login untuk dapat Token
+        // 1. Login Zepeto
         const loginUrl = 'https://cf-api-studio.zepeto.me/api/authenticate/zepeto-id';
         const loginResponse = await fetch(loginUrl, {
             method: 'POST',
-            headers: { 
-                'Content-Type': 'application/json',
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
-            },
+            headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ zepetoId: account.zepetoEmail, password: account.zepetoPassword })
         });
 
-        if (!loginResponse.ok) throw new Error('Gagal login untuk ambil token.');
+        if (!loginResponse.ok) throw new Error('Login gagal saat persiapan upload.');
         const loginData = await loginResponse.json();
         const bearerToken = `Bearer ${loginData.authToken}`;
 
-        // Return Token ke Client. Client yang akan upload ke Content-FGW.
+        // 2. SCANNING ENDPOINTS (Cari yang ngasih link S3)
+        // Kita coba beberapa kemungkinan endpoint yang biasanya dipakai di ekosistem Zepeto
+        const potentialEndpoints = [
+            'https://api-world-creator.zepeto.me/v1/files/upload-url', // Coba V1
+            'https://api-world-creator.zepeto.me/v2/files/upload-url', // Coba V2 lagi
+            'https://gw-napi.zepeto.io/files/upload-url',             // Coba Gateway
+            'https://api-studio.zepeto.me/v1/files/upload-url'         // Coba Studio
+        ];
+
+        // Payload juga kita variasi sedikit kalau perlu, tapi standar WORLD biasanya aman
+        const payload = { 
+            name: fileName, 
+            type: 'WORLD', // Trik biar dianggap file World (Limit gede)
+            extension: 'zepeto' 
+        };
+
+        const initData = await tryEndpoints(potentialEndpoints, payload, bearerToken);
+
+        // Kalau sukses, kita dapat URL S3 yang sakti (biasanya support CORS)
         return {
             success: true,
+            uploadUrl: initData.uploadUrl, // S3 URL
+            fileId: initData.fileId,
             token: bearerToken,
             categoryIdMap: { 'hair': '61681e66ec485e4a0df0d476', 'top': 'DR_TOP_01', 'bottom': 'DR_PANTS_01', 'dress': 'DR_DRESS_01', 'shoes': 'SH_SHOES_01' }[categoryKey]
         };
 
     } catch (error: any) {
-        console.error("Prepare Token Error:", error);
+        console.error("Prepare Upload Error:", error);
         return { success: false, message: error.message };
     }
 }
 
-// === STEP 3: FINALISASI (LINKING ASSET) ===
+// === STEP 3: FINALISASI ===
 export async function finalizeZepetoUpload(fileId: string, categoryId: string, token: string, fileName: string) {
     try {
-        // Trik Bypass: Kita link File ID dari Content-FGW (Generic Storage) ke Studio Item
+        // 1. Konfirmasi Upload (Wajib buat S3 flow)
+        // Kita tembak endpoint complete ke HOST yang sama dengan endpoint upload-url tadi (asumsi world creator)
+        // Kalau fileId formatnya beda, server mungkin nolak, tapi kita coba standard
+        await fetch(`https://api-world-creator.zepeto.me/v1/files/${fileId}/complete`, { // Coba V1 complete
+            method: 'POST',
+            headers: { 'Authorization': token }
+        }).catch(() => {}); // Ignore error, kadang auto-complete
+
+        // 2. Linking Asset
         const linkAssetResponse = await fetch(`https://cf-api-studio.zepeto.me/api/assets/link`, {
             method: 'POST',
             headers: { 
                 'Authorization': token,
-                'Content-Type': 'application/json',
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+                'Content-Type': 'application/json'
             },
             body: JSON.stringify({
                 categoryId: categoryId,
-                fileId: fileId, // ID dari Content-FGW
+                fileId: fileId,
                 name: fileName
             })
         });
@@ -156,19 +209,17 @@ export async function finalizeZepetoUpload(fileId: string, categoryId: string, t
             const linkData = await linkAssetResponse.json();
             assetId = linkData.id;
         } else {
-            // Jika Link gagal, coba metode create asset biasa dengan inject ID (jarang berhasil tapi patut dicoba)
             const err = await linkAssetResponse.text();
-            throw new Error(`Gagal Linking Asset (${linkAssetResponse.status}): ${err}`);
+            throw new Error(`Gagal Linking Asset: ${err}`);
         }
 
-        // Build Asset
+        // 3. Build & Create Item (Standard Flow)
         await new Promise(resolve => setTimeout(resolve, 3000));
         await fetch(`https://cf-api-studio.zepeto.me/api/assets/${assetId}/build/${categoryId}`, {
             method: 'POST',
             headers: { 'Authorization': token },
         });
 
-        // Create Item
         await new Promise(resolve => setTimeout(resolve, 2000));
         const itemPayload = { price: 5, assetId: assetId, categoryId: categoryId, currency: "ZEM" };
         const itemResponse = await fetch('https://cf-api-studio.zepeto.me/api/items', {

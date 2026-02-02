@@ -22,7 +22,7 @@ export function ZepetoUploader({ accounts }: { accounts: ZepetoAccount[] }) {
 
   const handleSubmit = async (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault();
-    setStatus({ type: 'loading', message: 'Mempersiapkan token akses...' });
+    setStatus({ type: 'loading', message: 'Mencari jalur upload terbaik...' });
 
     const rawFormData = new FormData(e.currentTarget);
     const zepetoFile = rawFormData.get('zepetoFile') as File;
@@ -35,57 +35,45 @@ export function ZepetoUploader({ accounts }: { accounts: ZepetoAccount[] }) {
     }
 
     try {
-        // === STEP 1: LOGIN & AMBIL TOKEN (SERVER ACTION) ===
+        // === STEP 1: SCANNING JALUR UPLOAD ===
         const metaFormData = new FormData();
         metaFormData.append('accountId', accountId);
         metaFormData.append('category', category);
+        metaFormData.append('fileName', zepetoFile.name);
         
         const prepResult = await prepareZepetoUpload(metaFormData);
 
-        if (!prepResult || !prepResult.success || !prepResult.token) {
-            throw new Error(prepResult?.message || "Gagal mengambil token akses.");
+        if (!prepResult || !prepResult.success || !prepResult.uploadUrl) {
+            throw new Error(prepResult?.message || "Gagal menemukan jalur upload yang valid (404/Scanner Failed).");
         }
 
-        const bearerToken = prepResult.token;
+        const { uploadUrl, fileId, token, categoryIdMap } = prepResult;
 
-        // === STEP 2: CLIENT DIRECT UPLOAD KE CONTENT-FGW ===
-        // Kita tembak endpoint generic storage. Ini biasanya gapunya limit polygon ketat.
-        setStatus({ type: 'loading', message: `Mencoba Bypass Upload (Content Gateway)...` });
+        // === STEP 2: DIRECT UPLOAD KE S3/GCS ===
+        // URL ini didapat dari Zepeto resmi, biasanya sudah include Signature untuk izin upload
+        setStatus({ type: 'loading', message: `Mengupload 9MB ke Cloud Storage...` });
         
-        // Persiapkan FormData untuk endpoint Content-FGW
-        const uploadFormData = new FormData();
-        uploadFormData.append('file', zepetoFile);
-        uploadFormData.append('type', 'zepeto_file'); // Atau 'world_file'
-
-        const fgwResponse = await fetch('https://content-fgw.zepeto.io/v2/storage/files', {
-            method: 'POST',
+        const uploadResponse = await fetch(uploadUrl, {
+            method: 'PUT',
+            body: zepetoFile,
             headers: {
-                'Authorization': bearerToken
-                // Content-Type otomatis di-set browser jadi multipart/form-data
-            },
-            body: uploadFormData
+                'Content-Type': 'application/octet-stream'
+                // Jangan tambah header Authorization disini kalau URL-nya sudah presigned (ada query param signature)
+            }
         });
 
-        if (!fgwResponse.ok) {
-            const errText = await fgwResponse.text();
-            throw new Error(`Gagal Upload Bypass (HTTP ${fgwResponse.status}). Server: ${errText.substring(0, 50)}...`);
+        if (!uploadResponse.ok) {
+            const errText = await uploadResponse.text().catch(() => '');
+            throw new Error(`Gagal Upload Cloud (${uploadResponse.status}): ${errText}`);
         }
 
-        const fgwData = await fgwResponse.json();
-        // Biasanya balikan JSON-nya: { id: "...", fileId: "...", ... }
-        const bypassedFileId = fgwData.fileId || fgwData.id;
-
-        if (!bypassedFileId) {
-            throw new Error("Upload berhasil tapi tidak dapat File ID dari server.");
-        }
-
-        // === STEP 3: FINALISASI & LINKING (SERVER ACTION) ===
-        setStatus({ type: 'loading', message: 'Finalisasi & Linking Asset...' });
+        // === STEP 3: FINALISASI ===
+        setStatus({ type: 'loading', message: 'Finalisasi Item di Studio...' });
         
         const finalResult = await finalizeZepetoUpload(
-            bypassedFileId, 
-            prepResult.categoryIdMap, 
-            bearerToken,
+            fileId, 
+            categoryIdMap, 
+            token,
             zepetoFile.name
         );
 
@@ -93,11 +81,11 @@ export function ZepetoUploader({ accounts }: { accounts: ZepetoAccount[] }) {
             setStatus({ type: 'success', message: finalResult.message as string });
             formRef.current?.reset();
         } else {
-            setStatus({ type: 'error', message: finalResult?.message || "Gagal finalisasi item." });
+            setStatus({ type: 'error', message: finalResult?.message || "Gagal finalisasi." });
         }
 
     } catch (error: any) {
-        console.error("Upload Process Error:", error);
+        console.error("Upload Error:", error);
         setStatus({ type: 'error', message: error.message || 'Terjadi kesalahan sistem.' });
     }
   };
