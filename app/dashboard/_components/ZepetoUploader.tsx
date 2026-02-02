@@ -6,6 +6,7 @@ import type { ZepetoAccount } from '@prisma/client';
 import Link from 'next/link';
 
 export function ZepetoUploader({ accounts }: { accounts: ZepetoAccount[] }) {
+  // State mounted untuk mencegah Hydration Error (418/423)
   const [mounted, setMounted] = useState(false);
   const [status, setStatus] = useState<{ 
       type: 'idle' | 'success' | 'error' | 'loading'; 
@@ -22,7 +23,9 @@ export function ZepetoUploader({ accounts }: { accounts: ZepetoAccount[] }) {
 
   const handleSubmit = async (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault();
-    setStatus({ type: 'loading', message: 'Scanning endpoint Zepeto...' });
+    if (!mounted) return; // Guard clause
+
+    setStatus({ type: 'loading', message: 'Mencari jalur tikus (Scanning)...' });
 
     const rawFormData = new FormData(e.currentTarget);
     const zepetoFile = rawFormData.get('zepetoFile') as File;
@@ -30,13 +33,12 @@ export function ZepetoUploader({ accounts }: { accounts: ZepetoAccount[] }) {
     const category = rawFormData.get('category') as string;
 
     if (!zepetoFile || zepetoFile.size === 0) {
-        setStatus({ type: 'error', message: 'Silakan pilih file terlebih dahulu.' });
+        setStatus({ type: 'error', message: 'Pilih file dulu bos.' });
         return;
     }
 
     try {
-        // === STEP 1: DAPATKAN URL UPLOAD (SERVER ACTION) ===
-        // Menggunakan metadata only agar cepat & bypass limit Vercel
+        // === STEP 1: SERVER SIDE - Cari Upload URL ===
         const metaFormData = new FormData();
         metaFormData.append('accountId', accountId);
         metaFormData.append('category', category);
@@ -45,32 +47,31 @@ export function ZepetoUploader({ accounts }: { accounts: ZepetoAccount[] }) {
         const prepResult = await prepareZepetoUpload(metaFormData);
 
         if (!prepResult || !prepResult.success || !prepResult.uploadUrl) {
-            throw new Error(prepResult?.message || "Gagal mendapatkan jalur upload (Endpoint Scanner Failed).");
+            throw new Error(prepResult?.message || "Scanner gagal menemukan endpoint valid.");
         }
 
         const { uploadUrl, fileId, token, categoryIdMap } = prepResult;
 
-        // === STEP 2: DIRECT UPLOAD KE S3/GCS ===
-        // URL S3 biasanya panjang dan mengandung signature.
-        setStatus({ type: 'loading', message: `Mengupload 9MB ke Cloud Storage...` });
+        // === STEP 2: CLIENT SIDE - Upload ke S3 ===
+        setStatus({ type: 'loading', message: 'Mengupload ke Cloud (Bypass Vercel)...' });
         
+        // PENTING: Jangan pake header Authorization disini karena URL S3 biasanya sudah pre-signed (ada signature di URL)
+        // Set Content-Type ke 'application/octet-stream' agar aman diterima bucket manapun
         const uploadResponse = await fetch(uploadUrl, {
             method: 'PUT',
-            body: zepetoFile, // RAW Binary
+            body: zepetoFile,
             headers: {
-                // Jangan set 'Content-Type' manual jika presigned URL sudah strict, 
-                // biarkan browser atau set 'application/octet-stream' jika diminta.
                 'Content-Type': 'application/octet-stream'
             }
         });
 
         if (!uploadResponse.ok) {
-            // Jika gagal 403 Forbidden, biasanya karena Content-Type header salah.
-            throw new Error(`Gagal Upload Cloud (${uploadResponse.status}). Pastikan file sesuai.`);
+            const errText = await uploadResponse.text().catch(() => '');
+            throw new Error(`Gagal Upload ke Cloud Storage (${uploadResponse.status}). Cek koneksi.`);
         }
 
-        // === STEP 3: FINALISASI ===
-        setStatus({ type: 'loading', message: 'Finalisasi Item di Studio...' });
+        // === STEP 3: SERVER SIDE - Finalisasi ===
+        setStatus({ type: 'loading', message: 'Finalisasi & Linking di Studio...' });
         
         const finalResult = await finalizeZepetoUpload(
             fileId, 
@@ -83,18 +84,19 @@ export function ZepetoUploader({ accounts }: { accounts: ZepetoAccount[] }) {
             setStatus({ type: 'success', message: finalResult.message as string });
             formRef.current?.reset();
         } else {
-            setStatus({ type: 'error', message: finalResult?.message || "Gagal finalisasi." });
+            setStatus({ type: 'error', message: finalResult?.message || "Gagal di tahap akhir." });
         }
 
     } catch (error: any) {
-        console.error("Upload Error:", error);
-        setStatus({ type: 'error', message: error.message || 'Terjadi kesalahan sistem.' });
+        console.error("Full Process Error:", error);
+        setStatus({ type: 'error', message: error.message || 'Error tidak diketahui.' });
     }
   };
 
   const commonInputStyle = "w-full px-4 py-3 bg-gray-900 border border-gray-700 rounded-lg placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-indigo-500 transition-all disabled:bg-gray-800/50 disabled:cursor-not-allowed";
 
-  if (!mounted) return <div className="p-4 text-gray-400">Memuat uploader...</div>;
+  // Prevent render sampai client mounted (Fix Error 418)
+  if (!mounted) return <div className="p-4 text-gray-500 animate-pulse">Memuat Uploader...</div>;
 
   return (
     <form ref={formRef} onSubmit={handleSubmit} className="space-y-6">
@@ -127,6 +129,11 @@ export function ZepetoUploader({ accounts }: { accounts: ZepetoAccount[] }) {
             <option>Tambahkan akun yang terhubung terlebih dahulu</option>
           )}
         </select>
+        {accounts.length > 0 && accounts.filter(acc => acc.status === 'CONNECTED').length === 0 && (
+            <p className="text-xs text-yellow-400 mt-2">
+                Tidak ada akun yang berstatus &apos;Terhubung&apos;. Silakan cek koneksi di halaman <Link href="/dashboard/akun" className="underline">Manajemen Akun</Link>.
+            </p>
+        )}
       </div>
 
       <div>
