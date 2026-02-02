@@ -6,7 +6,6 @@ import type { ZepetoAccount } from '@prisma/client';
 import Link from 'next/link';
 
 export function ZepetoUploader({ accounts }: { accounts: ZepetoAccount[] }) {
-  // State mounted = true berarti sudah di client, aman dari Hydration mismatch
   const [mounted, setMounted] = useState(false);
   const [status, setStatus] = useState<{ 
       type: 'idle' | 'success' | 'error' | 'loading'; 
@@ -25,7 +24,7 @@ export function ZepetoUploader({ accounts }: { accounts: ZepetoAccount[] }) {
     e.preventDefault();
     if (!mounted) return;
 
-    setStatus({ type: 'loading', message: 'Mencari jalur tikus (Scanning)...' });
+    setStatus({ type: 'loading', message: 'Scanning endpoint...' });
 
     const rawFormData = new FormData(e.currentTarget);
     const zepetoFile = rawFormData.get('zepetoFile') as File;
@@ -47,36 +46,35 @@ export function ZepetoUploader({ accounts }: { accounts: ZepetoAccount[] }) {
         const prepResult = await prepareZepetoUpload(metaFormData);
 
         if (!prepResult || !prepResult.success || !prepResult.uploadUrl) {
-            throw new Error(prepResult?.message || "Gagal mendapatkan URL Upload dari Zepeto.");
+            throw new Error(prepResult?.message || "Scanner gagal. Cek log server.");
         }
 
-        const { uploadUrl, fileId, token, categoryIdMap } = prepResult;
+        const { uploadUrl, fileId, token, categoryIdMap, sourceUrl } = prepResult;
 
-        // === STEP 2: DIRECT UPLOAD KE S3/Google (Client-Side) ===
-        // Ini kunci bypass: Upload file gede langsung ke S3 Zepeto, bukan lewat Vercel.
+        // === STEP 2: DIRECT UPLOAD KE S3 (Client-Side) ===
         setStatus({ type: 'loading', message: `Upload 9MB ke Cloud Storage...` });
         
         const uploadResponse = await fetch(uploadUrl, {
             method: 'PUT',
             body: zepetoFile,
             headers: {
-                // Header ini harus match sama request 'contentType' di prepareZepetoUpload
                 'Content-Type': 'application/octet-stream' 
             }
         });
 
         if (!uploadResponse.ok) {
-            throw new Error(`Gagal Upload ke Cloud Storage (${uploadResponse.status}). Cek koneksi internet.`);
+            throw new Error(`Gagal Upload ke Cloud Storage (${uploadResponse.status}).`);
         }
 
         // === STEP 3: FINALISASI (Server Action) ===
-        setStatus({ type: 'loading', message: 'Finalisasi & Linking di Studio...' });
+        setStatus({ type: 'loading', message: 'Finalisasi & Linking...' });
         
         const finalResult = await finalizeZepetoUpload(
             fileId, 
             categoryIdMap, 
             token,
-            zepetoFile.name
+            zepetoFile.name,
+            sourceUrl
         );
 
         if (finalResult?.success) {
@@ -87,24 +85,15 @@ export function ZepetoUploader({ accounts }: { accounts: ZepetoAccount[] }) {
         }
 
     } catch (error: any) {
-        console.error("Process Error:", error);
+        console.error("Upload Error:", error);
         setStatus({ type: 'error', message: error.message || 'Error tidak diketahui.' });
     }
   };
 
   const commonInputStyle = "w-full px-4 py-3 bg-gray-900 border border-gray-700 rounded-lg placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-indigo-500 transition-all disabled:bg-gray-800/50 disabled:cursor-not-allowed";
 
-  // Render Skeleton jika belum mounted (Anti Hydration Error)
-  if (!mounted) {
-    return (
-        <div className="space-y-6 animate-pulse p-4 bg-gray-800/20 rounded-lg">
-            <div className="h-4 bg-gray-700 rounded w-1/3"></div>
-            <div className="h-10 bg-gray-700 rounded"></div>
-            <div className="h-4 bg-gray-700 rounded w-1/4"></div>
-            <div className="h-10 bg-gray-700 rounded"></div>
-        </div>
-    );
-  }
+  // STRICT ANTI-HYDRATION: Return null jika belum client-side
+  if (!mounted) return null;
 
   return (
     <form ref={formRef} onSubmit={handleSubmit} className="space-y-6">
@@ -137,11 +126,6 @@ export function ZepetoUploader({ accounts }: { accounts: ZepetoAccount[] }) {
             <option>Tambahkan akun yang terhubung terlebih dahulu</option>
           )}
         </select>
-        {accounts.length > 0 && accounts.filter(acc => acc.status === 'CONNECTED').length === 0 && (
-            <p className="text-xs text-yellow-400 mt-2">
-                Tidak ada akun yang berstatus &apos;Terhubung&apos;. Silakan cek koneksi di halaman <Link href="/dashboard/akun" className="underline">Manajemen Akun</Link>.
-            </p>
-        )}
       </div>
 
       <div>
