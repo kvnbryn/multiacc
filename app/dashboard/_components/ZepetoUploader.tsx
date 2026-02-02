@@ -6,7 +6,7 @@ import type { ZepetoAccount } from '@prisma/client';
 import Link from 'next/link';
 
 export function ZepetoUploader({ accounts }: { accounts: ZepetoAccount[] }) {
-  // State mounted untuk mencegah Hydration Error (418/423)
+  // State mounted = true berarti sudah di client, aman dari Hydration mismatch
   const [mounted, setMounted] = useState(false);
   const [status, setStatus] = useState<{ 
       type: 'idle' | 'success' | 'error' | 'loading'; 
@@ -23,7 +23,7 @@ export function ZepetoUploader({ accounts }: { accounts: ZepetoAccount[] }) {
 
   const handleSubmit = async (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault();
-    if (!mounted) return; // Guard clause
+    if (!mounted) return;
 
     setStatus({ type: 'loading', message: 'Mencari jalur tikus (Scanning)...' });
 
@@ -38,7 +38,7 @@ export function ZepetoUploader({ accounts }: { accounts: ZepetoAccount[] }) {
     }
 
     try {
-        // === STEP 1: SERVER SIDE - Cari Upload URL ===
+        // === STEP 1: SCANNING (Server Action) ===
         const metaFormData = new FormData();
         metaFormData.append('accountId', accountId);
         metaFormData.append('category', category);
@@ -47,30 +47,29 @@ export function ZepetoUploader({ accounts }: { accounts: ZepetoAccount[] }) {
         const prepResult = await prepareZepetoUpload(metaFormData);
 
         if (!prepResult || !prepResult.success || !prepResult.uploadUrl) {
-            throw new Error(prepResult?.message || "Scanner gagal menemukan endpoint valid.");
+            throw new Error(prepResult?.message || "Gagal mendapatkan URL Upload dari Zepeto.");
         }
 
         const { uploadUrl, fileId, token, categoryIdMap } = prepResult;
 
-        // === STEP 2: CLIENT SIDE - Upload ke S3 ===
-        setStatus({ type: 'loading', message: 'Mengupload ke Cloud (Bypass Vercel)...' });
+        // === STEP 2: DIRECT UPLOAD KE S3/Google (Client-Side) ===
+        // Ini kunci bypass: Upload file gede langsung ke S3 Zepeto, bukan lewat Vercel.
+        setStatus({ type: 'loading', message: `Upload 9MB ke Cloud Storage...` });
         
-        // PENTING: Jangan pake header Authorization disini karena URL S3 biasanya sudah pre-signed (ada signature di URL)
-        // Set Content-Type ke 'application/octet-stream' agar aman diterima bucket manapun
         const uploadResponse = await fetch(uploadUrl, {
             method: 'PUT',
             body: zepetoFile,
             headers: {
-                'Content-Type': 'application/octet-stream'
+                // Header ini harus match sama request 'contentType' di prepareZepetoUpload
+                'Content-Type': 'application/octet-stream' 
             }
         });
 
         if (!uploadResponse.ok) {
-            const errText = await uploadResponse.text().catch(() => '');
-            throw new Error(`Gagal Upload ke Cloud Storage (${uploadResponse.status}). Cek koneksi.`);
+            throw new Error(`Gagal Upload ke Cloud Storage (${uploadResponse.status}). Cek koneksi internet.`);
         }
 
-        // === STEP 3: SERVER SIDE - Finalisasi ===
+        // === STEP 3: FINALISASI (Server Action) ===
         setStatus({ type: 'loading', message: 'Finalisasi & Linking di Studio...' });
         
         const finalResult = await finalizeZepetoUpload(
@@ -88,15 +87,24 @@ export function ZepetoUploader({ accounts }: { accounts: ZepetoAccount[] }) {
         }
 
     } catch (error: any) {
-        console.error("Full Process Error:", error);
+        console.error("Process Error:", error);
         setStatus({ type: 'error', message: error.message || 'Error tidak diketahui.' });
     }
   };
 
   const commonInputStyle = "w-full px-4 py-3 bg-gray-900 border border-gray-700 rounded-lg placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-indigo-500 transition-all disabled:bg-gray-800/50 disabled:cursor-not-allowed";
 
-  // Prevent render sampai client mounted (Fix Error 418)
-  if (!mounted) return <div className="p-4 text-gray-500 animate-pulse">Memuat Uploader...</div>;
+  // Render Skeleton jika belum mounted (Anti Hydration Error)
+  if (!mounted) {
+    return (
+        <div className="space-y-6 animate-pulse p-4 bg-gray-800/20 rounded-lg">
+            <div className="h-4 bg-gray-700 rounded w-1/3"></div>
+            <div className="h-10 bg-gray-700 rounded"></div>
+            <div className="h-4 bg-gray-700 rounded w-1/4"></div>
+            <div className="h-10 bg-gray-700 rounded"></div>
+        </div>
+    );
+  }
 
   return (
     <form ref={formRef} onSubmit={handleSubmit} className="space-y-6">

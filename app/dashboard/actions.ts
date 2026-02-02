@@ -92,44 +92,43 @@ export async function addZepetoAccount(formData: FormData) {
   }
 }
 
-// === INTELLIGENT ENDPOINT SCANNER (THE BYPASS) ===
-async function tryEndpoints(endpoints: string[], payload: any, token: string) {
+// === INTELLIGENT SCANNER V4 (MIMIC STUDIO WEB) ===
+async function tryEndpoints(scenarios: { url: string, payload: any }[], token: string) {
     let lastError;
-    // Header ini KUNCI agar server mengira kita adalah "World Creator" resmi
     const headers = {
         'Authorization': token,
         'Content-Type': 'application/json',
-        'X-Zepeto-App-Version': '3.25.0', // Versi app terbaru
-        'X-Zepeto-Platform': 'Android',   // Pura-pura dari HP/Unity
-        'User-Agent': 'ZEPETO/3.25.0 (Android; 11; SM-G991B)' 
+        // User Agent ini PENTING biar gak dikira bot
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36'
     };
 
-    for (const url of endpoints) {
+    for (const scenario of scenarios) {
         try {
-            console.log(`Trying endpoint: ${url}`);
-            const res = await fetch(url, {
+            console.log(`Trying Scanner: ${scenario.url} with payload keys: ${Object.keys(scenario.payload)}`);
+            const res = await fetch(scenario.url, {
                 method: 'POST',
                 headers: headers,
-                body: JSON.stringify(payload)
+                body: JSON.stringify(scenario.payload)
             });
             
             if (res.ok) {
                 const data = await res.json();
-                // Validasi apakah return data punya URL untuk upload
-                if (data.uploadUrl || (data.result && data.result.uploadUrl)) {
-                    console.log(`Success endpoint: ${url}`);
-                    return data.result ? data.result : data;
+                // Normalisasi output karena beda endpoint beda format response
+                const result = data.result || data;
+                if (result.uploadUrl) {
+                    console.log(`Scanner Success: ${scenario.url}`);
+                    return result;
                 }
             }
             
             const errText = await res.text();
-            lastError = `[${res.status}] ${url} -> ${errText.substring(0, 50)}`;
-            console.warn(`Scanner Failed: ${lastError}`);
+            lastError = `[${res.status}] ${scenario.url} -> ${errText.substring(0, 100)}`;
+            console.warn(`Scanner Fail: ${lastError}`);
         } catch (e) {
-            console.error(`Connection error to ${url}`, e);
+            console.error(`Scanner Connection Error`, e);
         }
     }
-    throw new Error(lastError || 'Semua endpoint menolak koneksi.');
+    throw new Error(lastError || 'Semua kombinasi endpoint gagal.');
 }
 
 export async function prepareZepetoUpload(formData: FormData) {
@@ -156,30 +155,49 @@ export async function prepareZepetoUpload(formData: FormData) {
         const loginData = await loginResponse.json();
         const bearerToken = `Bearer ${loginData.authToken}`;
 
-        // 2. SCANNING PATH YANG BENAR (Tanpa '/upload-url')
-        // Kita incar endpoint 'v2/files' di host World Creator. Ini biasanya endpoint "Create File Entry"
-        // yang otomatis balikin Presigned URL S3.
-        const potentialEndpoints = [
-            'https://api-world-creator.zepeto.me/v2/files',     // Target Utama (World V2)
-            'https://api-world-creator.zepeto.me/v1/files',     // Target Cadangan (World V1)
-            'https://gw-napi.zepeto.io/storage/v1/files',       // Target Gateway (General Storage)
-            'https://api-studio.zepeto.me/v1/files'             // Target Studio (Jarang work buat bypass, tapi coba aja)
+        // 2. SCANNING SCENARIOS (PAYLOAD PERMUTATION)
+        // Kita siapkan beberapa skenario serangan.
+        
+        const categoryId = { 'hair': '61681e66ec485e4a0df0d476', 'top': 'DR_TOP_01', 'bottom': 'DR_PANTS_01', 'dress': 'DR_DRESS_01', 'shoes': 'SH_SHOES_01' }[categoryKey];
+
+        const scenarios = [
+            // SCENARIO A: MIMIC STUDIO WEB (Paling Besar Kemungkinan Berhasil)
+            // Ini endpoint yang dipakai browser saat lu upload di website resmi Zepeto Studio.
+            {
+                url: `https://cf-api-studio.zepeto.me/api/assets/upload-url?categoryId=${categoryId}`,
+                payload: {
+                    contentType: "application/octet-stream", // Zepeto Studio Web pake ini, bukan 'type'
+                    fileName: fileName,
+                }
+            },
+            // SCENARIO B: WORLD CREATOR V2 (Fallback Limit Besar)
+            {
+                url: 'https://api-world-creator.zepeto.me/v2/files/upload-url',
+                payload: {
+                    name: fileName,
+                    type: 'WORLD',
+                    extension: 'zepeto'
+                }
+            },
+             // SCENARIO C: API STUDIO V1 (Legacy)
+            {
+                url: 'https://api-studio.zepeto.me/v1/files/upload-url',
+                payload: {
+                    name: fileName,
+                    type: 'ITEM', // Coba tipe ITEM standard
+                    extension: 'zepeto'
+                }
+            }
         ];
 
-        const payload = { 
-            name: fileName, 
-            type: 'WORLD',    // KUNCI: 'WORLD' punya kuota size lebih besar drpd 'ITEM'
-            extension: 'zepeto' 
-        };
-
-        const initData = await tryEndpoints(potentialEndpoints, payload, bearerToken);
+        const initData = await tryEndpoints(scenarios, bearerToken);
 
         return {
             success: true,
-            uploadUrl: initData.uploadUrl, // S3 URL yang support Direct Upload
+            uploadUrl: initData.uploadUrl, // URL S3 Presigned
             fileId: initData.fileId || initData.id,
             token: bearerToken,
-            categoryIdMap: { 'hair': '61681e66ec485e4a0df0d476', 'top': 'DR_TOP_01', 'bottom': 'DR_PANTS_01', 'dress': 'DR_DRESS_01', 'shoes': 'SH_SHOES_01' }[categoryKey]
+            categoryIdMap: categoryId
         };
 
     } catch (error: any) {
@@ -190,9 +208,8 @@ export async function prepareZepetoUpload(formData: FormData) {
 
 export async function finalizeZepetoUpload(fileId: string, categoryId: string, token: string, fileName: string) {
     try {
-        // 1. Link Asset (Trick: Paksa file 'World' jadi 'Item')
-        // Ini step paling krusial. Kita ambil ID file yang udah diupload ke bucket World,
-        // terus kita 'link' ke Studio seolah-olah itu file Item.
+        // 1. Linking Asset 
+        // Endpoint ini memberitahu Studio bahwa fileId (dari S3) adalah milik aset ini
         const linkAssetResponse = await fetch(`https://cf-api-studio.zepeto.me/api/assets/link`, {
             method: 'POST',
             headers: { 
@@ -202,7 +219,7 @@ export async function finalizeZepetoUpload(fileId: string, categoryId: string, t
             },
             body: JSON.stringify({
                 categoryId: categoryId,
-                fileId: fileId, 
+                fileId: fileId,
                 name: fileName
             })
         });
@@ -212,29 +229,35 @@ export async function finalizeZepetoUpload(fileId: string, categoryId: string, t
             const linkData = await linkAssetResponse.json();
             assetId = linkData.id;
         } else {
-            // Fallback: Create Asset biasa tapi inject fileId
-            console.warn("Direct linking failed, attempting metadata injection...");
+            console.warn("Direct Linking failed, trying Injection...");
+            // Kalau linking gagal, coba Create Asset biasa tapi inject fileId
             const createRes = await fetch(`https://cf-api-studio.zepeto.me/api/assets`, {
                 method: 'POST',
                 headers: { 'Authorization': token, 'Content-Type': 'application/json' },
-                body: JSON.stringify({ categoryId, name: fileName, fileId: fileId })
+                body: JSON.stringify({ 
+                    categoryId, 
+                    name: fileName, 
+                    fileId: fileId, // INJECT ID DISINI
+                    description: ""
+                })
             });
+            
             if(createRes.ok) {
                 const createData = await createRes.json();
                 assetId = createData.id;
             } else {
-                throw new Error("Gagal Linking & Injecting Asset.");
+                 throw new Error("Gagal Linking & Injecting Asset.");
             }
         }
 
-        // 2. Build (Verifikasi Metadata)
+        // 2. Build
         await new Promise(resolve => setTimeout(resolve, 3000));
         await fetch(`https://cf-api-studio.zepeto.me/api/assets/${assetId}/build/${categoryId}`, {
             method: 'POST',
             headers: { 'Authorization': token },
         });
 
-        // 3. Create Item Final
+        // 3. Create Item
         await new Promise(resolve => setTimeout(resolve, 2000));
         const itemPayload = { price: 5, assetId: assetId, categoryId: categoryId, currency: "ZEM" };
         const itemResponse = await fetch('https://cf-api-studio.zepeto.me/api/items', {
