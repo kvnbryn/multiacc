@@ -1,11 +1,13 @@
+// File: app/dashboard/_components/ZepetoUploader.tsx
 'use client';
 
-import { useState, useRef } from 'react';
+import { useState, useRef, useEffect } from 'react';
 import { prepareZepetoUpload, finalizeZepetoUpload } from '../actions';
 import type { ZepetoAccount } from '@prisma/client';
 import Link from 'next/link';
 
 export function ZepetoUploader({ accounts }: { accounts: ZepetoAccount[] }) {
+  const [mounted, setMounted] = useState(false);
   const [status, setStatus] = useState<{ 
       type: 'idle' | 'success' | 'error' | 'loading'; 
       message: string; 
@@ -15,62 +17,54 @@ export function ZepetoUploader({ accounts }: { accounts: ZepetoAccount[] }) {
   
   const formRef = useRef<HTMLFormElement>(null);
 
+  // Fix Hydration Error: Render form hanya setelah mounted di client
+  useEffect(() => {
+    setMounted(true);
+  }, []);
+
   const handleSubmit = async (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault();
     setStatus({ type: 'loading', message: 'Mempersiapkan jalur bypass...' });
 
-    // Ambil semua data form
     const rawFormData = new FormData(e.currentTarget);
     const zepetoFile = rawFormData.get('zepetoFile') as File;
     const accountId = rawFormData.get('accountId') as string;
     const category = rawFormData.get('category') as string;
 
-    // Validasi file basic
     if (!zepetoFile || zepetoFile.size === 0) {
         setStatus({ type: 'error', message: 'Silakan pilih file terlebih dahulu.' });
         return;
     }
 
     try {
-        // === STEP 1: PERSIAPAN (Minta Tiket ke Server) ===
-        // PENTING: Kita bikin FormData BARU yang HANYA berisi metadata teks.
-        // File fisiknya JANGAN dimasukkan ke sini biar gak kena limit 4.5MB Vercel.
+        // === STEP 1: PERSIAPAN (Server Action - NO FILE UPLOAD HERE) ===
         const metaFormData = new FormData();
         metaFormData.append('accountId', accountId);
         metaFormData.append('category', category);
         metaFormData.append('fileName', zepetoFile.name);
-        metaFormData.append('fileSize', zepetoFile.size.toString());
-
-        // Kirim payload ringan ke Server Action
+        
         const prepResult = await prepareZepetoUpload(metaFormData);
 
-        // Cek error 'undefined' (jika server down/timeout)
-        if (!prepResult) {
-            throw new Error("Server tidak merespon (No Response). Cek koneksi internet.");
-        }
-
+        if (!prepResult) throw new Error("Server tidak merespon.");
         if (!prepResult.success || !prepResult.uploadUrl) {
             throw new Error(prepResult.message || "Gagal persiapan upload.");
         }
 
-        // === STEP 2: CLIENT-SIDE DIRECT UPLOAD (Bypass Vercel & Proxy) ===
-        // Nah, file fisiknya baru kita pake di sini. Langsung tembak ke URL Zepeto.
-        setStatus({ type: 'loading', message: `Sedang mengupload ${zepetoFile.name} (Direct Bypass)...` });
+        // === STEP 2: CLIENT DIRECT UPLOAD (Bypass Vercel) ===
+        setStatus({ type: 'loading', message: `Mengupload ${zepetoFile.name} (Direct Bypass)...` });
         
         const uploadResponse = await fetch(prepResult.uploadUrl, {
             method: 'PUT',
-            body: zepetoFile, // Kirim RAW Binary File
-            headers: {
-                'Content-Type': 'application/octet-stream' 
-            }
+            body: zepetoFile,
+            headers: { 'Content-Type': 'application/octet-stream' }
         });
 
         if (!uploadResponse.ok) {
-            throw new Error("Gagal upload fisik file ke server Zepeto. Cek koneksi internet.");
+            throw new Error("Gagal upload fisik ke server Zepeto (S3 Error).");
         }
 
-        // === STEP 3: Finalisasi & Linking di Server ===
-        setStatus({ type: 'loading', message: 'Finalisasi & Bypass Poligon...' });
+        // === STEP 3: FINALISASI ===
+        setStatus({ type: 'loading', message: 'Finalisasi & Linking Asset...' });
         
         const finalResult = await finalizeZepetoUpload(
             prepResult.fileId, 
@@ -79,25 +73,27 @@ export function ZepetoUploader({ accounts }: { accounts: ZepetoAccount[] }) {
             zepetoFile.name
         );
 
-        if (finalResult && finalResult.success) {
+        if (finalResult?.success) {
             setStatus({ type: 'success', message: finalResult.message as string });
             formRef.current?.reset();
         } else {
-            setStatus({ type: 'error', message: finalResult?.message || "Gagal finalisasi item." });
+            setStatus({ type: 'error', message: finalResult?.message || "Gagal finalisasi." });
         }
 
     } catch (error: any) {
-        console.error("Upload Flow Error:", error);
-        setStatus({ type: 'error', message: error.message || 'Terjadi kesalahan sistem yang tidak terduga.' });
+        console.error("Upload Error:", error);
+        setStatus({ type: 'error', message: error.message || 'Terjadi kesalahan sistem.' });
     }
   };
 
   const commonInputStyle = "w-full px-4 py-3 bg-gray-900 border border-gray-700 rounded-lg placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-indigo-500 transition-all disabled:bg-gray-800/50 disabled:cursor-not-allowed";
 
+  if (!mounted) return <div className="p-4 text-gray-400">Memuat uploader...</div>;
+
   return (
     <form ref={formRef} onSubmit={handleSubmit} className="space-y-6">
       {status.type !== 'idle' && (
-         <div className={`p-3 rounded-lg text-sm ${
+         <div className={`p-3 rounded-lg text-sm break-words ${
             status.type === 'success' ? 'bg-green-500/20 text-green-300 border border-green-500/30' :
             status.type === 'error' ? 'bg-red-500/20 text-red-300 border border-red-500/30' :
             'bg-blue-500/20 text-blue-300 border border-blue-500/30'

@@ -1,3 +1,5 @@
+// File: app/dashboard/actions.ts
+
 'use server';
 
 import prisma from '@/lib/prisma';
@@ -13,9 +15,7 @@ export async function logout() {
 
 export async function getZepetoAccounts() {
   const session = await getSession();
-  if (!session.userId) {
-    return [];
-  }
+  if (!session.userId) return [];
   const accounts = await prisma.zepetoAccount.findMany({
     where: { userId: session.userId },
     orderBy: { createdAt: 'desc' },
@@ -47,47 +47,34 @@ export async function validateAccount(formData: FormData) {
 }
 
 export async function addZepetoAccount(formData: FormData) {
-  // === LANGKAH 1: DAPATKAN SESI LOGIN DARI WEB DASHBOARD ===
   const session = await getSession();
-  if (!session.userId) {
-    throw new Error('Sesi Anda tidak valid. Silakan login ulang ke dashboard.');
-  }
+  if (!session.userId) throw new Error('Sesi Anda tidak valid. Silakan login ulang.');
 
-  // === LANGKAH 2: VALIDASI USER DASHBOARD KE DATABASE ===
   const dashboardUser = await prisma.user.findUnique({ where: { id: session.userId } });
-  if (!dashboardUser) {
-    throw new Error('Akun dashboard Anda tidak ditemukan di database.');
-  }
+  if (!dashboardUser) throw new Error('Akun dashboard Anda tidak ditemukan.');
   
-  // === LANGKAH 3: AMBIL DATA AKUN ZEPETO DARI FORM ===
   const zepetoId = formData.get('zepetoEmail') as string;
   const password = formData.get('zepetoPassword') as string;
   const nameLabel = formData.get('name') as string || 'Zepeto Account';
 
-  if (!zepetoId || !password) {
-      throw new Error('ZEPETO ID dan Password tidak boleh kosong.');
-  }
+  if (!zepetoId || !password) throw new Error('ZEPETO ID dan Password tidak boleh kosong.');
 
   try {
-    // === LANGKAH 4: COBA LOGIN KE API ZEPETO ===
     const loginUrl = 'https://cf-api-studio.zepeto.me/api/authenticate/zepeto-id';
     const loginResponse = await fetch(loginUrl, { 
         method: 'POST', 
-        headers: { 'Content-Type': 'application/json' }, 
+        headers: { 
+            'Content-Type': 'application/json',
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+        }, 
         body: JSON.stringify({ zepetoId, password }) 
     });
 
-    if (!loginResponse.ok) {
-        throw new Error('Login ZEPETO gagal. Periksa kembali ID dan Password Anda.');
-    }
+    if (!loginResponse.ok) throw new Error('Login ZEPETO gagal. Periksa ID dan Password.');
     
     const loginData = await loginResponse.json();
     const profile = loginData.profile;
-    if (!profile) {
-        throw new Error('Data profil ZEPETO tidak ditemukan setelah login berhasil.');
-    }
     
-    // === LANGKAH 5: SIMPAN AKUN ===
     await prisma.zepetoAccount.create({
         data: {
           userId: dashboardUser.id,
@@ -106,14 +93,12 @@ export async function addZepetoAccount(formData: FormData) {
     return { success: true, message: 'Akun Zepeto berhasil ditambahkan!' };
   } catch (error) { 
     console.error("Proses tambah akun ZEPETO gagal:", error); 
-    if (error instanceof Error) {
-        throw new Error(error.message);
-    }
-    throw new Error("Terjadi kesalahan yang tidak diketahui saat menambah akun.");
+    if (error instanceof Error) throw new Error(error.message);
+    throw new Error("Terjadi kesalahan sistem.");
   }
 }
 
-// === STEP 1: PERSIAPAN UPLOAD (Dapatkan Tiket Masuk & Token) ===
+// === STEP 1: PERSIAPAN UPLOAD (Revised V2) ===
 export async function prepareZepetoUpload(formData: FormData) {
     const session = await getSession();
     if (!session.userId) return { success: false, message: 'Sesi tidak valid.' };
@@ -122,51 +107,75 @@ export async function prepareZepetoUpload(formData: FormData) {
     const fileName = formData.get('fileName') as string;
     const categoryKey = formData.get('category') as string;
 
-    if (!accountId || !fileName || !categoryKey) {
-        return { success: false, message: "Data tidak lengkap (Account/File/Category missing)." };
-    }
-
     const account = await prisma.zepetoAccount.findUnique({ where: { id: accountId } });
-    if (!account || account.status !== 'CONNECTED') return { success: false, message: 'Akun bermasalah atau tidak terhubung.' };
+    if (!account || account.status !== 'CONNECTED') return { success: false, message: 'Akun bermasalah.' };
 
     try {
-        // 1. Login Zepeto untuk dapat Token
+        // 1. Login Zepeto
         const loginUrl = 'https://cf-api-studio.zepeto.me/api/authenticate/zepeto-id';
         const loginResponse = await fetch(loginUrl, {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
+            headers: { 
+                'Content-Type': 'application/json',
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+            },
             body: JSON.stringify({ zepetoId: account.zepetoEmail, password: account.zepetoPassword })
         });
 
-        if (!loginResponse.ok) throw new Error('Login ZEPETO gagal saat persiapan upload.');
+        if (!loginResponse.ok) throw new Error('Login gagal saat persiapan upload.');
         const loginData = await loginResponse.json();
         const bearerToken = `Bearer ${loginData.authToken}`;
 
-        // 2. Minta URL Upload ke WORLD HOST (Bypass Limit Polygon & Size)
-        const initUploadUrl = 'https://api-world-creator.zepeto.me/v2/files/upload-url'; 
-        const initResponse = await fetch(initUploadUrl, {
+        // 2. Minta URL Upload (Try Primary: World Creator)
+        // REVISI: Ganti type jadi 'WORLD' dan tambahkan content type header
+        const worldInitUrl = 'https://api-world-creator.zepeto.me/v2/files/upload-url'; 
+        let initResponse = await fetch(worldInitUrl, {
             method: 'POST',
             headers: { 
                 'Authorization': bearerToken,
-                'Content-Type': 'application/json' 
+                'Content-Type': 'application/json',
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
             },
             body: JSON.stringify({ 
                 name: fileName, 
-                type: 'USER_FILE', 
+                type: 'WORLD', // <-- Ganti dari USER_FILE ke WORLD
                 extension: 'zepeto' 
             })
         });
 
-        if (!initResponse.ok) throw new Error("Gagal meminta izin upload ke Server World.");
+        // FALLBACK: Jika tipe 'WORLD' gagal, coba tipe 'generic' atau endpoint Content Gateway
+        if (!initResponse.ok) {
+            console.warn("Primary upload init failed, trying fallback...");
+            
+            // Coba payload alternatif
+            initResponse = await fetch(worldInitUrl, {
+                method: 'POST',
+                headers: { 
+                    'Authorization': bearerToken,
+                    'Content-Type': 'application/json' 
+                },
+                body: JSON.stringify({ 
+                    name: fileName, 
+                    type: 'USER_FILE', 
+                    extension: 'zip' // Coba pura-pura jadi zip
+                })
+            });
+        }
+
+        if (!initResponse.ok) {
+            // DEBUGGING: Ambil pesan error asli dari server Zepeto
+            const errorText = await initResponse.text();
+            console.error("Zepeto Upload Init Error:", errorText);
+            throw new Error(`Gagal minta izin upload. Server: ${errorText.substring(0, 100)}`);
+        }
 
         const initData = await initResponse.json();
         
-        // Return data ini ke Client agar browser bisa upload langsung
         return {
             success: true,
-            uploadUrl: initData.uploadUrl, // URL tujuan upload (S3/GCS)
-            fileId: initData.fileId,       // ID File yang akan dipakai nanti
-            token: bearerToken,            // Token otentikasi
+            uploadUrl: initData.uploadUrl,
+            fileId: initData.fileId,
+            token: bearerToken,
             categoryIdMap: { 'hair': '61681e66ec485e4a0df0d476', 'top': 'DR_TOP_01', 'bottom': 'DR_PANTS_01', 'dress': 'DR_DRESS_01', 'shoes': 'SH_SHOES_01' }[categoryKey]
         };
 
@@ -176,26 +185,22 @@ export async function prepareZepetoUpload(formData: FormData) {
     }
 }
 
-// === STEP 3: FINALISASI (Setelah Browser selesai upload) ===
+// === STEP 3: FINALISASI ===
 export async function finalizeZepetoUpload(fileId: string, categoryId: string, token: string, fileName: string) {
     try {
-        // 1. Konfirmasi ke Server World bahwa upload selesai
-        const completeResponse = await fetch(`https://api-world-creator.zepeto.me/v2/files/${fileId}/complete`, {
+        // 1. Konfirmasi Upload
+        await fetch(`https://api-world-creator.zepeto.me/v2/files/${fileId}/complete`, {
             method: 'POST',
             headers: { 'Authorization': token }
         });
 
-        if (!completeResponse.ok) {
-            console.warn("Warning: World Complete signal failed, but trying to proceed anyway...");
-        }
-
-        // 2. LINKING ASSET (Trik Bypass)
-        // Kita daftarkan FileID dari World Server itu masuk ke Studio sebagai Item
+        // 2. Linking Asset
         const linkAssetResponse = await fetch(`https://cf-api-studio.zepeto.me/api/assets/link`, {
             method: 'POST',
             headers: { 
                 'Authorization': token,
-                'Content-Type': 'application/json'
+                'Content-Type': 'application/json',
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
             },
             body: JSON.stringify({
                 categoryId: categoryId,
@@ -209,20 +214,21 @@ export async function finalizeZepetoUpload(fileId: string, categoryId: string, t
             const linkData = await linkAssetResponse.json();
             assetId = linkData.id;
         } else {
-            // Jika Link API gagal, kita lempar error karena ini metode utama bypass kita
-            throw new Error("Gagal menghubungkan file (Linking Asset). Metode bypass ditolak server.");
+            const err = await linkAssetResponse.text();
+            throw new Error("Gagal menghubungkan file (Linking): " + err);
         }
 
-        // 3. BUILD ASSET
+        // 3. Build Asset (Tunggu 5 detik biar aman)
+        await new Promise(resolve => setTimeout(resolve, 5000));
+        
         await fetch(`https://cf-api-studio.zepeto.me/api/assets/${assetId}/build/${categoryId}`, {
             method: 'POST',
             headers: { 'Authorization': token },
         });
 
-        // Tunggu sebentar biar server proses build (mocking delay)
-        await new Promise(resolve => setTimeout(resolve, 3000));
+        // 4. Create Item
+        await new Promise(resolve => setTimeout(resolve, 2000));
 
-        // 4. CREATE ITEM
         const itemPayload = { price: 5, assetId: assetId, categoryId: categoryId, currency: "ZEM" };
         const itemResponse = await fetch('https://cf-api-studio.zepeto.me/api/items', {
             method: 'POST',
