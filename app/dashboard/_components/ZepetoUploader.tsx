@@ -24,7 +24,7 @@ export function ZepetoUploader({ accounts }: { accounts: ZepetoAccount[] }) {
     e.preventDefault();
     if (!mounted) return;
 
-    setStatus({ type: 'loading', message: 'Scanning endpoint...' });
+    setStatus({ type: 'loading', message: 'Mencari jalur upload terbaik...' });
 
     const rawFormData = new FormData(e.currentTarget);
     const zepetoFile = rawFormData.get('zepetoFile') as File;
@@ -37,23 +37,25 @@ export function ZepetoUploader({ accounts }: { accounts: ZepetoAccount[] }) {
     }
 
     try {
-        // === STEP 1: SCANNING (Server Action) ===
+        // === STEP 1: SERVER SIDE (Get Presigned URL) ===
         const metaFormData = new FormData();
         metaFormData.append('accountId', accountId);
         metaFormData.append('category', category);
         metaFormData.append('fileName', zepetoFile.name);
+        metaFormData.append('fileSize', zepetoFile.size.toString());
         
         const prepResult = await prepareZepetoUpload(metaFormData);
 
         if (!prepResult || !prepResult.success || !prepResult.uploadUrl) {
-            throw new Error(prepResult?.message || "Scanner gagal. Cek log server.");
+            throw new Error(prepResult?.message || "Semua metode bypass gagal. Coba lagi nanti.");
         }
 
         const { uploadUrl, fileId, token, categoryIdMap, sourceUrl } = prepResult;
 
-        // === STEP 2: DIRECT UPLOAD KE S3 (Client-Side) ===
-        setStatus({ type: 'loading', message: `Upload 9MB ke Cloud Storage...` });
+        // === STEP 2: CLIENT SIDE (Direct Upload) ===
+        setStatus({ type: 'loading', message: `Mengupload ${zepetoFile.name} ke Cloud...` });
         
+        // Gunakan PUT untuk S3 Presigned URL
         const uploadResponse = await fetch(uploadUrl, {
             method: 'PUT',
             body: zepetoFile,
@@ -63,11 +65,11 @@ export function ZepetoUploader({ accounts }: { accounts: ZepetoAccount[] }) {
         });
 
         if (!uploadResponse.ok) {
-            throw new Error(`Gagal Upload ke Cloud Storage (${uploadResponse.status}).`);
+            throw new Error(`Gagal Upload Cloud (${uploadResponse.status}). Koneksi diputus server.`);
         }
 
-        // === STEP 3: FINALISASI (Server Action) ===
-        setStatus({ type: 'loading', message: 'Finalisasi & Linking...' });
+        // === STEP 3: FINALISASI ===
+        setStatus({ type: 'loading', message: 'Linking Asset ke Studio...' });
         
         const finalResult = await finalizeZepetoUpload(
             fileId, 
@@ -81,18 +83,18 @@ export function ZepetoUploader({ accounts }: { accounts: ZepetoAccount[] }) {
             setStatus({ type: 'success', message: finalResult.message as string });
             formRef.current?.reset();
         } else {
-            setStatus({ type: 'error', message: finalResult?.message || "Gagal di tahap akhir." });
+            setStatus({ type: 'error', message: finalResult?.message || "Gagal linking asset." });
         }
 
     } catch (error: any) {
-        console.error("Upload Error:", error);
-        setStatus({ type: 'error', message: error.message || 'Error tidak diketahui.' });
+        console.error("Process Error:", error);
+        setStatus({ type: 'error', message: error.message || 'Terjadi kesalahan sistem.' });
     }
   };
 
   const commonInputStyle = "w-full px-4 py-3 bg-gray-900 border border-gray-700 rounded-lg placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-indigo-500 transition-all disabled:bg-gray-800/50 disabled:cursor-not-allowed";
 
-  // STRICT ANTI-HYDRATION: Return null jika belum client-side
+  // FIX HYDRATION ERROR: Jangan render apapun sampai client siap
   if (!mounted) return null;
 
   return (
@@ -126,6 +128,11 @@ export function ZepetoUploader({ accounts }: { accounts: ZepetoAccount[] }) {
             <option>Tambahkan akun yang terhubung terlebih dahulu</option>
           )}
         </select>
+        {accounts.length > 0 && accounts.filter(acc => acc.status === 'CONNECTED').length === 0 && (
+            <p className="text-xs text-yellow-400 mt-2">
+                Tidak ada akun yang berstatus &apos;Terhubung&apos;. Silakan cek koneksi di halaman <Link href="/dashboard/akun" className="underline">Manajemen Akun</Link>.
+            </p>
+        )}
       </div>
 
       <div>
