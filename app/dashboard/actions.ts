@@ -59,7 +59,7 @@ export async function addZepetoAccount(formData: FormData) {
     throw new Error('Akun dashboard Anda tidak ditemukan di database.');
   }
   
-  // === LANGKAH 3: AMBIL DATA AKUN ZEPETO DARI FORM YANG DIISI PENGGUNA ===
+  // === LANGKAH 3: AMBIL DATA AKUN ZEPETO DARI FORM ===
   const zepetoId = formData.get('zepetoEmail') as string;
   const password = formData.get('zepetoPassword') as string;
   const nameLabel = formData.get('name') as string || 'Zepeto Account';
@@ -69,7 +69,7 @@ export async function addZepetoAccount(formData: FormData) {
   }
 
   try {
-    // === LANGKAH 4: COBA LOGIN KE API ZEPETO PAKAI DATA DARI FORM ===
+    // === LANGKAH 4: COBA LOGIN KE API ZEPETO ===
     const loginUrl = 'https://cf-api-studio.zepeto.me/api/authenticate/zepeto-id';
     const loginResponse = await fetch(loginUrl, { 
         method: 'POST', 
@@ -87,13 +87,13 @@ export async function addZepetoAccount(formData: FormData) {
         throw new Error('Data profil ZEPETO tidak ditemukan setelah login berhasil.');
     }
     
-    // === LANGKAH 5: JIKA LOGIN ZEPETO BERHASIL, SIMPAN AKUN ZEPETO KE DATABASE ===
+    // === LANGKAH 5: SIMPAN AKUN ===
     await prisma.zepetoAccount.create({
         data: {
           userId: dashboardUser.id,
           name: nameLabel, 
           zepetoEmail: zepetoId,
-          zepetoPassword: password, 
+          zepetoPassword: password,
           displayName: profile.name, 
           username: profile.userId, 
           profilePic: profile.imageUrl,
@@ -114,7 +114,6 @@ export async function addZepetoAccount(formData: FormData) {
 }
 
 // === STEP 1: PERSIAPAN UPLOAD (Dapatkan Tiket Masuk & Token) ===
-// Fungsi ini menggantikan uploadZepetoItem lama untuk menghindari limit Vercel.
 export async function prepareZepetoUpload(formData: FormData) {
     const session = await getSession();
     if (!session.userId) return { success: false, message: 'Sesi tidak valid.' };
@@ -122,6 +121,10 @@ export async function prepareZepetoUpload(formData: FormData) {
     const accountId = formData.get('accountId') as string;
     const fileName = formData.get('fileName') as string;
     const categoryKey = formData.get('category') as string;
+
+    if (!accountId || !fileName || !categoryKey) {
+        return { success: false, message: "Data tidak lengkap (Account/File/Category missing)." };
+    }
 
     const account = await prisma.zepetoAccount.findUnique({ where: { id: accountId } });
     if (!account || account.status !== 'CONNECTED') return { success: false, message: 'Akun bermasalah atau tidak terhubung.' };

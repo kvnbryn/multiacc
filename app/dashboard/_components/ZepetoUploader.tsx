@@ -6,7 +6,6 @@ import type { ZepetoAccount } from '@prisma/client';
 import Link from 'next/link';
 
 export function ZepetoUploader({ accounts }: { accounts: ZepetoAccount[] }) {
-  // State diperluas untuk handle status loading yang lebih detail
   const [status, setStatus] = useState<{ 
       type: 'idle' | 'success' | 'error' | 'loading'; 
       message: string; 
@@ -20,8 +19,11 @@ export function ZepetoUploader({ accounts }: { accounts: ZepetoAccount[] }) {
     e.preventDefault();
     setStatus({ type: 'loading', message: 'Mempersiapkan jalur bypass...' });
 
-    const formData = new FormData(e.currentTarget);
-    const zepetoFile = formData.get('zepetoFile') as File;
+    // Ambil semua data form
+    const rawFormData = new FormData(e.currentTarget);
+    const zepetoFile = rawFormData.get('zepetoFile') as File;
+    const accountId = rawFormData.get('accountId') as string;
+    const category = rawFormData.get('category') as string;
 
     // Validasi file basic
     if (!zepetoFile || zepetoFile.size === 0) {
@@ -30,22 +32,31 @@ export function ZepetoUploader({ accounts }: { accounts: ZepetoAccount[] }) {
     }
 
     try {
-        // === STEP 1: Minta Tiket & URL Upload ke Server Action ===
-        // Kita tambahkan metadata manual ke formData agar Server Action bisa baca
-        formData.append('fileName', zepetoFile.name);
-        formData.append('fileSize', zepetoFile.size.toString());
+        // === STEP 1: PERSIAPAN (Minta Tiket ke Server) ===
+        // PENTING: Kita bikin FormData BARU yang HANYA berisi metadata teks.
+        // File fisiknya JANGAN dimasukkan ke sini biar gak kena limit 4.5MB Vercel.
+        const metaFormData = new FormData();
+        metaFormData.append('accountId', accountId);
+        metaFormData.append('category', category);
+        metaFormData.append('fileName', zepetoFile.name);
+        metaFormData.append('fileSize', zepetoFile.size.toString());
 
-        const prepResult = await prepareZepetoUpload(formData);
+        // Kirim payload ringan ke Server Action
+        const prepResult = await prepareZepetoUpload(metaFormData);
+
+        // Cek error 'undefined' (jika server down/timeout)
+        if (!prepResult) {
+            throw new Error("Server tidak merespon (No Response). Cek koneksi internet.");
+        }
 
         if (!prepResult.success || !prepResult.uploadUrl) {
             throw new Error(prepResult.message || "Gagal persiapan upload.");
         }
 
         // === STEP 2: CLIENT-SIDE DIRECT UPLOAD (Bypass Vercel & Proxy) ===
+        // Nah, file fisiknya baru kita pake di sini. Langsung tembak ke URL Zepeto.
         setStatus({ type: 'loading', message: `Sedang mengupload ${zepetoFile.name} (Direct Bypass)...` });
         
-        // Kita pakai fetch browser biasa buat nembak langsung ke Zepeto CDN (S3/Google Cloud)
-        // Ini kuncinya: File dikirim langsung dari browser user ke storage Zepeto.
         const uploadResponse = await fetch(prepResult.uploadUrl, {
             method: 'PUT',
             body: zepetoFile, // Kirim RAW Binary File
@@ -68,11 +79,11 @@ export function ZepetoUploader({ accounts }: { accounts: ZepetoAccount[] }) {
             zepetoFile.name
         );
 
-        if (finalResult.success) {
+        if (finalResult && finalResult.success) {
             setStatus({ type: 'success', message: finalResult.message as string });
             formRef.current?.reset();
         } else {
-            setStatus({ type: 'error', message: finalResult.message as string });
+            setStatus({ type: 'error', message: finalResult?.message || "Gagal finalisasi item." });
         }
 
     } catch (error: any) {
