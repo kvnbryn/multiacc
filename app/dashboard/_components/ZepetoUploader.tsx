@@ -1,55 +1,95 @@
-// File: app/dashboard/_components/ZepetoUploader.tsx
 'use client';
 
-import { useState, useRef, useTransition } from 'react';
-import { uploadZepetoItem } from '../actions';
+import { useState, useRef } from 'react';
+import { prepareZepetoUpload, finalizeZepetoUpload } from '../actions';
 import type { ZepetoAccount } from '@prisma/client';
 import Link from 'next/link';
 
 export function ZepetoUploader({ accounts }: { accounts: ZepetoAccount[] }) {
-  const [status, setStatus] = useState<{
-    type: 'idle' | 'success' | 'error';
-    message: string;
-  }>({ type: 'idle', message: '' });
-  const [isPending, startTransition] = useTransition();
+  // State diperluas untuk handle status loading yang lebih detail
+  const [status, setStatus] = useState<{ 
+      type: 'idle' | 'success' | 'error' | 'loading'; 
+      message: string; 
+  }>({ 
+      type: 'idle', message: '' 
+  });
+  
   const formRef = useRef<HTMLFormElement>(null);
 
-  const handleSubmit = (formData: FormData) => {
-    setStatus({ type: 'idle', message: '' });
-    
-    startTransition(async () => {
-      try {
-        const result = await uploadZepetoItem(formData);
-        
-        // ===== PERBAIKAN DI SINI =====
-        // Kita cek dulu apakah 'result' ada isinya sebelum dibaca.
-        // Ini akan mencegah error "cannot read properties of undefined".
-        if (result && result.success) {
-            setStatus({ type: 'success', message: result.message as string });
-            formRef.current?.reset();
-        } else if (result) {
-            // Jika result ada tapi success = false
-            setStatus({ type: 'error', message: result.message as string });
-        } else {
-            // Jika result undefined (karena error jaringan, 413, dll)
-            setStatus({ type: 'error', message: 'Upload gagal. Kemungkinan file terlalu besar atau koneksi terputus.' });
+  const handleSubmit = async (e: React.FormEvent<HTMLFormElement>) => {
+    e.preventDefault();
+    setStatus({ type: 'loading', message: 'Mempersiapkan jalur bypass...' });
+
+    const formData = new FormData(e.currentTarget);
+    const zepetoFile = formData.get('zepetoFile') as File;
+
+    // Validasi file basic
+    if (!zepetoFile || zepetoFile.size === 0) {
+        setStatus({ type: 'error', message: 'Silakan pilih file terlebih dahulu.' });
+        return;
+    }
+
+    try {
+        // === STEP 1: Minta Tiket & URL Upload ke Server Action ===
+        // Kita tambahkan metadata manual ke formData agar Server Action bisa baca
+        formData.append('fileName', zepetoFile.name);
+        formData.append('fileSize', zepetoFile.size.toString());
+
+        const prepResult = await prepareZepetoUpload(formData);
+
+        if (!prepResult.success || !prepResult.uploadUrl) {
+            throw new Error(prepResult.message || "Gagal persiapan upload.");
         }
-      } catch (error) {
-        // Menangkap error lain jika ada
-        console.error("Upload error caught in component:", error);
-        setStatus({ type: 'error', message: 'Terjadi error yang tidak terduga.' });
-      }
-    });
+
+        // === STEP 2: CLIENT-SIDE DIRECT UPLOAD (Bypass Vercel & Proxy) ===
+        setStatus({ type: 'loading', message: `Sedang mengupload ${zepetoFile.name} (Direct Bypass)...` });
+        
+        // Kita pakai fetch browser biasa buat nembak langsung ke Zepeto CDN (S3/Google Cloud)
+        // Ini kuncinya: File dikirim langsung dari browser user ke storage Zepeto.
+        const uploadResponse = await fetch(prepResult.uploadUrl, {
+            method: 'PUT',
+            body: zepetoFile, // Kirim RAW Binary File
+            headers: {
+                'Content-Type': 'application/octet-stream' 
+            }
+        });
+
+        if (!uploadResponse.ok) {
+            throw new Error("Gagal upload fisik file ke server Zepeto. Cek koneksi internet.");
+        }
+
+        // === STEP 3: Finalisasi & Linking di Server ===
+        setStatus({ type: 'loading', message: 'Finalisasi & Bypass Poligon...' });
+        
+        const finalResult = await finalizeZepetoUpload(
+            prepResult.fileId, 
+            prepResult.categoryIdMap, 
+            prepResult.token,
+            zepetoFile.name
+        );
+
+        if (finalResult.success) {
+            setStatus({ type: 'success', message: finalResult.message as string });
+            formRef.current?.reset();
+        } else {
+            setStatus({ type: 'error', message: finalResult.message as string });
+        }
+
+    } catch (error: any) {
+        console.error("Upload Flow Error:", error);
+        setStatus({ type: 'error', message: error.message || 'Terjadi kesalahan sistem yang tidak terduga.' });
+    }
   };
 
   const commonInputStyle = "w-full px-4 py-3 bg-gray-900 border border-gray-700 rounded-lg placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-indigo-500 transition-all disabled:bg-gray-800/50 disabled:cursor-not-allowed";
 
   return (
-    <form ref={formRef} action={handleSubmit} className="space-y-6">
+    <form ref={formRef} onSubmit={handleSubmit} className="space-y-6">
       {status.type !== 'idle' && (
          <div className={`p-3 rounded-lg text-sm ${
             status.type === 'success' ? 'bg-green-500/20 text-green-300 border border-green-500/30' :
-            'bg-red-500/20 text-red-300 border border-red-500/30'
+            status.type === 'error' ? 'bg-red-500/20 text-red-300 border border-red-500/30' :
+            'bg-blue-500/20 text-blue-300 border border-blue-500/30'
          }`}>
             {status.message}
          </div>
@@ -61,7 +101,7 @@ export function ZepetoUploader({ accounts }: { accounts: ZepetoAccount[] }) {
           id="accountId" 
           name="accountId" 
           required 
-          disabled={accounts.length === 0 || isPending} 
+          disabled={accounts.length === 0 || status.type === 'loading'} 
           className={commonInputStyle}
         >
           {accounts.length > 0 ? (
@@ -87,7 +127,7 @@ export function ZepetoUploader({ accounts }: { accounts: ZepetoAccount[] }) {
             id="category" 
             name="category" 
             required 
-            disabled={isPending} 
+            disabled={status.type === 'loading'} 
             className={commonInputStyle}
         >
           <option value="top">Top (Atasan)</option>
@@ -106,17 +146,17 @@ export function ZepetoUploader({ accounts }: { accounts: ZepetoAccount[] }) {
             id="zepetoFile" 
             accept=".zepeto" 
             required 
-            disabled={isPending} 
+            disabled={status.type === 'loading'} 
             className={`${commonInputStyle} file:mr-4 file:py-2 file:px-4 file:rounded-md file:border-0 file:text-sm file:font-semibold file:bg-indigo-600/50 file:text-indigo-200 hover:file:bg-indigo-600/70`}
         />
       </div>
 
       <button 
         type="submit" 
-        disabled={isPending || accounts.filter(acc => acc.status === 'CONNECTED').length === 0} 
+        disabled={status.type === 'loading' || accounts.filter(acc => acc.status === 'CONNECTED').length === 0} 
         className="w-full py-3 font-semibold text-white bg-green-600 rounded-lg hover:bg-green-500 disabled:bg-gray-600 disabled:cursor-not-allowed transition-colors"
       >
-        {isPending ? 'Memproses...' : 'UPLOAD SEKARANG'}
+        {status.type === 'loading' ? 'Memproses Bypass...' : 'UPLOAD SEKARANG'}
       </button>
     </form>
   );
