@@ -37,7 +37,7 @@ export function ZepetoUploader({ accounts }: { accounts: ZepetoAccount[] }) {
     }
 
     try {
-        // === STEP 1: SERVER ACTION (Get Presigned URL) ===
+        // === STEP 1: SCANNING (Server Action) ===
         const metaFormData = new FormData();
         metaFormData.append('accountId', accountId);
         metaFormData.append('category', category);
@@ -47,12 +47,12 @@ export function ZepetoUploader({ accounts }: { accounts: ZepetoAccount[] }) {
         const prepResult = await prepareZepetoUpload(metaFormData);
 
         if (!prepResult || !prepResult.success || !prepResult.uploadUrl) {
-            throw new Error(prepResult?.message || "Gagal mendapatkan jalur upload.");
+            throw new Error(prepResult?.message || "Semua jalur upload terkunci.");
         }
 
         const { uploadUrl, fileId, token, categoryIdMap, sourceUrl } = prepResult;
 
-        // === STEP 2: CLIENT SIDE (Direct Upload to S3) ===
+        // === STEP 2: DIRECT UPLOAD KE S3 (Client-Side) ===
         setStatus({ type: 'loading', message: `Mengupload ${zepetoFile.name} ke Cloud...` });
         
         const uploadResponse = await fetch(uploadUrl, {
@@ -64,11 +64,11 @@ export function ZepetoUploader({ accounts }: { accounts: ZepetoAccount[] }) {
         });
 
         if (!uploadResponse.ok) {
-            throw new Error(`Gagal Upload Cloud (${uploadResponse.status}). Cek koneksi.`);
+            throw new Error(`Gagal Upload Cloud (${uploadResponse.status}).`);
         }
 
-        // === STEP 3: FINALISASI ===
-        setStatus({ type: 'loading', message: 'Menghubungkan Aset ke Studio...' });
+        // === STEP 3: FINALISASI (Server Action) ===
+        setStatus({ type: 'loading', message: 'Linking Asset ke Studio...' });
         
         const finalResult = await finalizeZepetoUpload(
             fileId, 
@@ -93,7 +93,6 @@ export function ZepetoUploader({ accounts }: { accounts: ZepetoAccount[] }) {
 
   const commonInputStyle = "w-full px-4 py-3 bg-gray-900 border border-gray-700 rounded-lg placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-indigo-500 transition-all disabled:bg-gray-800/50 disabled:cursor-not-allowed";
 
-  // Prevent Hydration Error
   if (!mounted) return null;
 
   return (
@@ -127,11 +126,6 @@ export function ZepetoUploader({ accounts }: { accounts: ZepetoAccount[] }) {
             <option>Tambahkan akun yang terhubung terlebih dahulu</option>
           )}
         </select>
-        {accounts.length > 0 && accounts.filter(acc => acc.status === 'CONNECTED').length === 0 && (
-            <p className="text-xs text-yellow-400 mt-2">
-                Tidak ada akun yang berstatus &apos;Terhubung&apos;. Silakan cek koneksi di halaman <Link href="/dashboard/akun" className="underline">Manajemen Akun</Link>.
-            </p>
-        )}
       </div>
 
       <div>
