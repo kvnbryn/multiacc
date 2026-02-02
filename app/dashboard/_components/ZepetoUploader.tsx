@@ -22,7 +22,7 @@ export function ZepetoUploader({ accounts }: { accounts: ZepetoAccount[] }) {
 
   const handleSubmit = async (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault();
-    setStatus({ type: 'loading', message: 'Mencari jalur upload terbaik...' });
+    setStatus({ type: 'loading', message: 'Scanning endpoint Zepeto...' });
 
     const rawFormData = new FormData(e.currentTarget);
     const zepetoFile = rawFormData.get('zepetoFile') as File;
@@ -35,7 +35,8 @@ export function ZepetoUploader({ accounts }: { accounts: ZepetoAccount[] }) {
     }
 
     try {
-        // === STEP 1: SCANNING JALUR UPLOAD ===
+        // === STEP 1: DAPATKAN URL UPLOAD (SERVER ACTION) ===
+        // Menggunakan metadata only agar cepat & bypass limit Vercel
         const metaFormData = new FormData();
         metaFormData.append('accountId', accountId);
         metaFormData.append('category', category);
@@ -44,27 +45,28 @@ export function ZepetoUploader({ accounts }: { accounts: ZepetoAccount[] }) {
         const prepResult = await prepareZepetoUpload(metaFormData);
 
         if (!prepResult || !prepResult.success || !prepResult.uploadUrl) {
-            throw new Error(prepResult?.message || "Gagal menemukan jalur upload yang valid (404/Scanner Failed).");
+            throw new Error(prepResult?.message || "Gagal mendapatkan jalur upload (Endpoint Scanner Failed).");
         }
 
         const { uploadUrl, fileId, token, categoryIdMap } = prepResult;
 
         // === STEP 2: DIRECT UPLOAD KE S3/GCS ===
-        // URL ini didapat dari Zepeto resmi, biasanya sudah include Signature untuk izin upload
+        // URL S3 biasanya panjang dan mengandung signature.
         setStatus({ type: 'loading', message: `Mengupload 9MB ke Cloud Storage...` });
         
         const uploadResponse = await fetch(uploadUrl, {
             method: 'PUT',
-            body: zepetoFile,
+            body: zepetoFile, // RAW Binary
             headers: {
+                // Jangan set 'Content-Type' manual jika presigned URL sudah strict, 
+                // biarkan browser atau set 'application/octet-stream' jika diminta.
                 'Content-Type': 'application/octet-stream'
-                // Jangan tambah header Authorization disini kalau URL-nya sudah presigned (ada query param signature)
             }
         });
 
         if (!uploadResponse.ok) {
-            const errText = await uploadResponse.text().catch(() => '');
-            throw new Error(`Gagal Upload Cloud (${uploadResponse.status}): ${errText}`);
+            // Jika gagal 403 Forbidden, biasanya karena Content-Type header salah.
+            throw new Error(`Gagal Upload Cloud (${uploadResponse.status}). Pastikan file sesuai.`);
         }
 
         // === STEP 3: FINALISASI ===
@@ -125,11 +127,6 @@ export function ZepetoUploader({ accounts }: { accounts: ZepetoAccount[] }) {
             <option>Tambahkan akun yang terhubung terlebih dahulu</option>
           )}
         </select>
-        {accounts.length > 0 && accounts.filter(acc => acc.status === 'CONNECTED').length === 0 && (
-            <p className="text-xs text-yellow-400 mt-2">
-                Tidak ada akun yang berstatus &apos;Terhubung&apos;. Silakan cek koneksi di halaman <Link href="/dashboard/akun" className="underline">Manajemen Akun</Link>.
-            </p>
-        )}
       </div>
 
       <div>
